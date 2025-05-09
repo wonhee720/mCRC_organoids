@@ -1,0 +1,679 @@
+import os
+import sys
+import re
+import copy
+import yaml
+import array
+import warnings
+import pysam 
+import cyvcf2
+import copy
+# import igv
+import allel
+import time
+import tempfile
+import subprocess
+import shlex
+import pyranges as pr
+import pickle as pkl
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+from matplotlib.colors import LogNorm
+import matplotlib.lines as mlines
+import seaborn as sns
+from matplotlib_venn import venn2
+from collections import defaultdict
+from collections import Counter
+from scipy.stats import norm
+from scipy.stats import ttest_ind
+from rpy2.robjects import pandas2ri
+import rpy2.robjects as ro
+from pandas.api.types import CategoricalDtype
+from Bio import SeqIO
+from PIL import Image
+from IPython.display import display
+from Bio import Phylo
+import ete3
+from ete3 import TreeStyle, Tree
+from pprint import pprint
+import matplotlib.font_manager as fm
+import statsmodels.api as sm
+import statistics
+from scipy import stats
+from scipy.stats import f_oneway
+import sigProfilerPlotting as sigPlt
+from SigProfilerExtractor import subroutines as sub
+from SigProfilerMatrixGenerator.scripts import SigProfilerMatrixGeneratorFunc as matGen
+from scipy.stats import chisquare
+import logging
+import itertools
+from functools import partial
+
+import inhouse_scripts
+
+chromosomes = [str(i) for i in list(range(1, 23)) + ['X', 'Y', 'MT']]
+chrom_cat_type = CategoricalDtype(categories=chromosomes, ordered=True)
+
+
+
+mdm2_cluster_LO5 = pd.read_csv("/home/users/wonhee720/Projects/03_CRC/02_vcf/gremlin_rescue/apply/69-LS78-O5/69-LS78-O5.gremlin.somatic.svs.concat.bptinfo.anv.filtered_1st.tsv.clustered.gap_seg.100kbAbsCN.complex_class.branch.cluster14",
+                          sep="\t", header=0, dtype={'#CHR1':str, 'POS1':int, 'CHR2':str, 'POS2':int, 'CT':str, 'SVTYPE':str})
+
+mdm2_cluster_P4 = pd.read_csv("/home/users/wonhee720/Projects/03_CRC/02_vcf/gremlin_rescue/apply/69-CT-O4/69-CT-O4.gremlin.somatic.svs.concat.bptinfo.anv.filtered_1st.tsv.clustered.gap_seg.100kbAbsCN.complex_class.branch.cluster17",
+                          sep="\t", header=0, dtype={'#CHR1':str, 'POS1':int, 'CHR2':str, 'POS2':int, 'CT':str, 'SVTYPE':str})
+
+mdm2_cluster_P10 = pd.read_csv("/home/users/wonhee720/Projects/03_CRC/02_vcf/gremlin_rescue/apply/69-CT-O10/69-CT-O10.gremlin.somatic.svs.concat.bptinfo.anv.filtered_1st.tsv.clustered.gap_seg.100kbAbsCN.complex_class.branch.cluster17",
+                          sep="\t", header=0, dtype={'#CHR1':str, 'POS1':int, 'CHR2':str, 'POS2':int, 'CT':str, 'SVTYPE':str})
+
+
+# Concat the SVs of three different ecDNAs reconstructed from different clones
+mdm2_cluster = pd.concat([mdm2_cluster_LO5, mdm2_cluster_P4[mdm2_cluster_P4['manual']!='69'], mdm2_cluster_P10[mdm2_cluster_P10['manual']!='69']])
+
+mdm2_cluster = mdm2_cluster.drop(labels=['tumor_vaf_bpt1','tumor_vaf_bpt2'], axis=1)
+
+
+# Load the gremlin file containing gremlin.v2 (with correct bpt2 VAF)
+gremlin_v2 = {}
+
+for path1, path2, sample in zip(gremlin_rescue1_v2_path_dict['69'], gremlin_rescue2_v2_path_dict['69'], sample_id_dict['69']):
+
+    if sample=='69-CT-O5':
+        path1 = '/home/users/wonhee720/Projects/03_CRC/02_vcf/gremlin_rescue.v2/apply/69-CT-O5/69-CT-O5.gremlin.somatic.svs.tier1.bptinfo.tsv'
+        
+    g1 = pd.read_csv(path1, sep="\t", header=0, dtype={'#CHR1':str, 'POS1':int, 'CHR2':str, 'POS2':int, 'CT':str, 'SVTYPE':str})
+    g2 = pd.read_csv(path2, sep="\t", header=0, dtype={'#CHR1':str, 'POS1':int, 'CHR2':str, 'POS2':int, 'CT':str, 'SVTYPE':str})
+    g_sum = pd.concat([g1,g2])
+    
+    gremlin_v2[sample] = g_sum
+
+
+
+# Update the mdm2_cluster dataframe with sample specific new VAFs from gremlin v2
+for i, (sample, df) in enumerate(gremlin_v2.items()):
+    if i==0:
+        mdm2_cluster_modi = mdm2_cluster.merge(df[['#CHR1','POS1','CHR2','POS2','CT','SVTYPE','tumor_vaf_bpt1','tumor_vaf_bpt2']], how="left",
+                    on=['#CHR1','POS1','CHR2','POS2','CT','SVTYPE'])
+    
+        mdm2_cluster_modi = mdm2_cluster_modi.rename(columns = {'tumor_vaf_bpt1': f'tumor_vaf_bpt1_{sample}','tumor_vaf_bpt2': f'tumor_vaf_bpt2_{sample}'})
+    
+    else: 
+        mdm2_cluster_modi = mdm2_cluster_modi.merge(df[['#CHR1','POS1','CHR2','POS2','CT','SVTYPE','tumor_vaf_bpt1','tumor_vaf_bpt2']], how="left",
+                    on=['#CHR1','POS1','CHR2','POS2','CT','SVTYPE'])
+    
+        mdm2_cluster_modi = mdm2_cluster_modi.rename(columns = {'tumor_vaf_bpt1': f'tumor_vaf_bpt1_{sample}','tumor_vaf_bpt2': f'tumor_vaf_bpt2_{sample}'})
+
+
+vaf_bpt1 = [f'tumor_vaf_bpt1_{x}' for x in sample_id_dict['69'] if 'O' in x ]
+vaf_bpt2 = [f'tumor_vaf_bpt2_{x}' for x in sample_id_dict['69'] if 'O' in x ]
+
+
+ccf_bpt = [f'ecCCF_{x}' for x in sample_id_dict['69'] if 'O' in x ]
+
+vaf_bpt1_liver = [x for x in vaf_bpt1 if 'CT' in x]
+vaf_bpt1_primary = [x for x in vaf_bpt1 if 'LS' in x]
+
+vaf_bpt2_liver = [x for x in vaf_bpt2 if 'CT' in x]
+vaf_bpt2_primary = [x for x in vaf_bpt2 if 'LS' in x]
+
+
+# VAF boxplot for each SVs
+# Split by liver (orange) or primary (blue)
+vaf_dist = copy.deepcopy(mdm2_cluster_modi)
+
+vaf_dist[['#CHR1','POS1','CHR2','POS2','SVTYPE']] = vaf_dist[['#CHR1','POS1','CHR2','POS2','SVTYPE']].astype(str)
+
+# Organized ID for figure
+vaf_dist['ID'] = "Chr" + vaf_dist['#CHR1'] + ":" + vaf_dist['POS1'] + " " + "Chr" + vaf_dist['CHR2'] + ":" + vaf_dist['POS2'] + " " + vaf_dist['SVTYPE'] 
+
+vaf_dist = vaf_dist.set_index(['ID'])
+vaf_dist = vaf_dist[vaf_bpt1].transpose()
+vaf_dist = vaf_dist.fillna(0)
+
+# Reorder the dataframe to group SVs from same similar branches
+# 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,27,28,29,30,33,35 -> Trunk
+# 17,18 -> Liver2-O4,O5
+# 19,20,21,22,23,24,25,26 -> Liver2-O5
+# 37,38,39,40,41,42 -> Primary-O4,5
+
+vaf_dist_trunk = vaf_dist.iloc[:, [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,27,28,29,30,33,35]]
+vaf_dist_rest = vaf_dist.iloc[:, [17,18, 19,20,21,22,23,24,25,26, 37,38,39,40,41,42]]
+vaf_dist_trunk =  vaf_dist_trunk.loc[ :,vaf_dist_trunk.mean().sort_values(ascending=False).index]
+
+vaf_dist = pd.concat([vaf_dist_trunk,vaf_dist_rest], axis=1)
+                                     
+fig, ax = plt.subplots(figsize=(20,5))
+sns.stripplot(data=vaf_dist, ax=ax, color='white', edgecolor='black', linewidth=1)
+sns.boxplot(data=vaf_dist, ax=ax, fliersize=0)
+ax.set_xticklabels(vaf_dist.columns, rotation =90)
+
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+
+ax.axvline(x=22.5, ymin=-10, ymax=110, color='black', linestyle='dashed', linewidth=2)
+
+plt.savefig("/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.SV_vaf.boxplot.svg")
+plt.show()
+
+
+
+# ecDNA bpts only
+vaf_dist_econly = copy.deepcopy(mdm2_cluster_modi)
+
+vaf_dist_econly = vaf_dist_econly[vaf_dist_econly['ecDNA_bpt']==True]
+
+vaf_dist_econly[['#CHR1','POS1','CHR2','POS2','SVTYPE']] = vaf_dist_econly[['#CHR1','POS1','CHR2','POS2','SVTYPE']].astype(str)
+
+# Organized ID for figure
+vaf_dist_econly['ID'] = "Chr" + vaf_dist_econly['#CHR1'] + ":" + vaf_dist_econly['POS1'] + " " + "Chr" + vaf_dist_econly['CHR2'] + ":" + vaf_dist_econly['POS2'] + " " + vaf_dist_econly['SVTYPE'] 
+
+vaf_dist_econly = vaf_dist_econly.set_index(['ID'])
+vaf_dist_econly = vaf_dist_econly[vaf_bpt1].transpose()
+vaf_dist_econly = vaf_dist_econly.fillna(0)
+
+# Reorder the dataframe to group SVs from same similar branches
+# 0,1,2,3,4,5,6,16,17,18,21,23-> Trunk
+# 7-> Liver2-O4,O5
+# 8,9,10,11,12,13,14,15 -> Liver2-O5
+# 25,26,27,28,29,30  -> Primary-O4,5 (not shared in Primary-O8,O9)
+
+vaf_dist_econly_trunk = vaf_dist_econly.iloc[:, [0,1,2,3,4,5,6,16,17,18,21,23]]
+vaf_dist_econly_rest = vaf_dist_econly.iloc[:, [7,8,9,10,11,12,13,14,15,25,26,27,28,29,30 ]]
+vaf_dist_econly_trunk =  vaf_dist_econly_trunk.loc[ :,vaf_dist_econly_trunk.mean().sort_values(ascending=False).index]
+
+vaf_dist_econly = pd.concat([vaf_dist_econly_trunk,vaf_dist_econly_rest], axis=1)
+                                     
+fig, ax = plt.subplots(figsize=(20,5))
+sns.stripplot(data=vaf_dist_econly, ax=ax, color='white', edgecolor='black', linewidth=1)
+sns.boxplot(data=vaf_dist_econly, ax=ax, fliersize=0)
+ax.set_xticklabels(vaf_dist_econly.columns, rotation =90)
+
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+
+ax.axvline(x=11.5, ymin=-10, ymax=110, color='black', linestyle='dashed', linewidth=2)
+ax.axvline(x=12.5, ymin=-10, ymax=110, color='black', linestyle='dashed', linewidth=2)
+ax.axvline(x=20.5, ymin=-10, ymax=110, color='black', linestyle='dashed', linewidth=2)
+
+plt.savefig("/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.SV_vaf.boxplot.ecDNAbpt_only.svg")
+plt.show()
+
+
+
+# CCF boxplot for each SVs
+# Split by liver (orange) or primary (blue)
+ccf_dist = copy.deepcopy(mdm2_cluster_modi)
+
+ccf_dist = ccf_dist[ccf_dist['ecDNA_bpt']==True]
+
+for vaf in vaf_bpt1:
+    sample = vaf.split("_")[3]
+    ccf_dist[f'ecCCF_{sample}'] = ccf_dist[vaf]*ccf_dist['CNt_in_ecDNA']
+
+ccf_dist[['#CHR1','POS1','CHR2','POS2','SVTYPE']] = ccf_dist[['#CHR1','POS1','CHR2','POS2','SVTYPE']].astype(str)
+
+# Organized ID for figure
+ccf_dist['ID'] = "Chr" + ccf_dist['#CHR1'] + ":" + ccf_dist['POS1'] + " " + "Chr" + ccf_dist['CHR2'] + ":" + ccf_dist['POS2'] + " " + ccf_dist['SVTYPE'] 
+
+ccf_dist = ccf_dist.set_index(['ID'])
+ccf_dist = ccf_dist[ccf_bpt].transpose()
+ccf_dist_econly = ccf_dist.fillna(0)
+
+ccf_dist_econly = ccf_dist_econly.applymap(lambda x: 100 if x>100 else x)
+
+# Reorder the dataframe to group SVs from same similar branches
+# 0,1,2,3,4,5,6,16,17,18,21,23-> Trunk
+# 7-> Liver2-O4,O5
+# 8,9,10,11,12,13,14,15 -> Liver2-O5
+# 25,26,27,28,29,30  -> Primary-O5
+
+ccf_dist_econly_trunk = ccf_dist_econly.iloc[:, [0,1,2,3,4,5,6,16,17,18,21,23]]
+ccf_dist_econly_rest = ccf_dist_econly.iloc[:, [7,8,9,10,11,12,13,14,15,25,26,27,28,29,30 ]]
+ccf_dist_econly_trunk =  ccf_dist_econly_trunk.loc[ :,ccf_dist_econly_trunk.mean().sort_values(ascending=False).index]
+
+ccf_dist_econly = pd.concat([ccf_dist_econly_trunk, ccf_dist_econly_rest], axis=1)
+                                     
+fig, ax = plt.subplots(figsize=(20,5))
+sns.stripplot(data=ccf_dist_econly, ax=ax, color='white', edgecolor='black', linewidth=1)
+sns.boxplot(data=ccf_dist_econly, ax=ax, fliersize=0)
+ax.set_xticklabels(ccf_dist_econly.columns, rotation =90)
+
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+
+ax.axvline(x=11.5, ymin=-10, ymax=110, color='black', linestyle='dashed', linewidth=2)
+ax.axvline(x=12.5, ymin=-10, ymax=110, color='black', linestyle='dashed', linewidth=2)
+ax.axvline(x=20.5, ymin=-10, ymax=110, color='black', linestyle='dashed', linewidth=2)
+
+plt.savefig("/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.SV_ccf.boxplot.ecDNAbpt_only.svg")
+plt.show()
+
+
+
+# Get CCF barplot
+
+def site_finder(row):
+    index = row.name
+
+    if "CT" in index:
+        return "Primary"
+    elif "LS4" in index:
+        return "Liver1"
+    elif "LS78" in index:
+        return "Liver2"
+
+def sample_finder(row):
+    index = row.name
+    sample = index.split("_")[1]
+
+    return sample
+
+
+# Trunk
+ecDNA_only_trunk_bpts = list(ccf_dist_econly_trunk.columns)
+
+ccf_dist_econly_trunk['Site'] = ccf_dist_econly_trunk.apply(lambda row: site_finder(row), axis=1)
+ccf_dist_econly_trunk['Sample'] = ccf_dist_econly_trunk.apply(lambda row: sample_finder(row), axis=1)
+
+# Get a dataframe that has all the CCF values in a single column
+tmp_dfls = []
+
+for bpt in ecDNA_only_trunk_bpts:
+    df_frag = ccf_dist_econly_trunk[[bpt,'Site','Sample']]
+    df_frag = df_frag.rename(columns={bpt:'CCF'})
+    tmp_dfls.append(df_frag)
+
+ecDNA_only_trunk_bpts_concat = pd.concat(tmp_dfls)
+
+
+fig, ax = plt.subplots(figsize=(25/25.4,20/25.4))
+
+sns.stripplot(data=ecDNA_only_trunk_bpts_concat, x='Site', y='CCF', ax=ax, size=3.5, jitter=0.3,
+              edgecolor='black', linewidth=0.5, color='#F29600')
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+
+plt.ylim((-5,105))
+plt.xlabel('')
+plt.ylabel('CCF (%)')
+plt.savefig("/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.dynamic_evidence.trunk_CCF.svg")
+plt.show()
+
+
+# Branch 4
+ccf_dist_econly_branch4 = ccf_dist_econly_rest.iloc[:, [1,2,3,4,5,6,7,8]]
+
+ecDNA_only_branch4_bpts = list(ccf_dist_econly_branch4.columns)
+
+
+ccf_dist_econly_branch4['Site'] = ccf_dist_econly_branch4.apply(lambda row: site_finder(row), axis=1)
+ccf_dist_econly_branch4['Sample'] = ccf_dist_econly_branch4.apply(lambda row: sample_finder(row), axis=1)
+ccf_dist_econly_branch4['Site2'] = ccf_dist_econly_branch4.apply(lambda row: 'Liver2-O5' if row['Sample']=='69-LS78-O5' else 'Others', axis=1)
+
+# Get a dataframe that has all the CCF values in a single column
+tmp_dfls = []
+
+for bpt in ecDNA_only_branch4_bpts:
+    df_frag = ccf_dist_econly_branch4[[bpt,'Site2','Sample']]
+    df_frag = df_frag.rename(columns={bpt:'CCF'})
+    tmp_dfls.append(df_frag)
+
+ecDNA_only_branch4_bpts_concat = pd.concat(tmp_dfls)
+
+fig, ax = plt.subplots(figsize=(17.5/25.4,20/25.4))
+
+sns.stripplot(data=ecDNA_only_branch4_bpts_concat, x='Site2', y='CCF', ax=ax, size=3.5, edgecolor='black', linewidth=0.5, jitter=0.3, color='#FFE200')
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+
+plt.ylim((-5,105))
+plt.xlabel('')
+plt.ylabel('')
+plt.savefig("/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.dynamic_evidence.branch4_CCF.svg")
+plt.show()
+
+
+# Branch 3
+ccf_dist_econly_branch3 = ccf_dist_econly_rest.iloc[:,[0]]
+
+ecDNA_only_branch3_bpts = list(ccf_dist_econly_branch3.columns)
+
+ccf_dist_econly_branch3['Site'] = ccf_dist_econly_branch3.apply(lambda row: site_finder(row), axis=1)
+ccf_dist_econly_branch3['Sample'] = ccf_dist_econly_branch3.apply(lambda row: sample_finder(row), axis=1)
+ccf_dist_econly_branch3['Site2'] = ccf_dist_econly_branch3.apply(lambda row: 'Liver2' if '69-LS78' in row['Sample'] else 'Others', axis=1)
+
+# Get a dataframe that has all the CCF values in a single column
+tmp_dfls = []
+
+for bpt in ecDNA_only_branch3_bpts:
+    df_frag = ccf_dist_econly_branch3[[bpt,'Site2','Sample']]
+    df_frag = df_frag.rename(columns={bpt:'CCF'})
+    tmp_dfls.append(df_frag)
+
+ecDNA_only_branch3_bpts_concat = pd.concat(tmp_dfls)
+
+fig, ax = plt.subplots(figsize=(17.5/25.4,20/25.4))
+
+sns.stripplot(data=ecDNA_only_branch3_bpts_concat, x='Site2', y='CCF', ax=ax,size=3.5, edgecolor='black', linewidth=0.5, 
+              jitter=0.3, color='#00a0e9')
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+
+plt.ylim((-5,105))
+plt.xlabel('')
+plt.ylabel('')
+plt.savefig("/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.dynamic_evidence.branch3_CCF.svg")
+plt.show()
+
+
+# Branch5
+ccf_dist_econly_branch5 = ccf_dist_econly_rest.iloc[:,[9,10,11,12,13,14]]
+
+ecDNA_only_branch5_bpts = list(ccf_dist_econly_branch5.columns)
+
+
+# Get a dataframe that has all the CCF values in a single column
+tmp_dfls = []
+
+for bpt in ecDNA_only_branch5_bpts:
+    df_frag = ccf_dist_econly_branch5[[bpt,'Site2','Sample']]
+    df_frag = df_frag.rename(columns={bpt:'CCF'})
+    tmp_dfls.append(df_frag)
+
+ecDNA_only_branch5_bpts_concat = pd.concat(tmp_dfls)
+
+fig, ax = plt.subplots(figsize=(17.5/25.4,20/25.4))
+
+sns.stripplot(data=ecDNA_only_branch5_bpts_concat, x='Site2', y='CCF', ax=ax, size=3.5, edgecolor='black', linewidth=0.5, 
+              jitter=0.3, color='#339900')
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+
+plt.ylim((-5,105))
+plt.xlabel('')
+plt.ylabel('')
+plt.savefig("/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.dynamic_evidence.branch5_CCF.svg")
+plt.show()
+
+
+
+#  Copy number of ecDNAs
+mosdepths_totalavg = [f"/home/users/wonhee720/Projects/03_CRC/02_vcf/mosdepth/{x}/{x}.mosdepth.summary.txt" for x in sample_id_dict['69']]
+mosdepths_mdm2 = [f"/home/users/wonhee720/Projects/03_CRC/02_vcf/mosdepth/{x}.MDM2_ecDNA/{x}.MDM2_ecDNA.regions.bed.gz" for x in sample_id_dict['69']]
+
+ecDNA_CN = defaultdict(dict)
+
+for path1, path2, sample in zip(mosdepths_totalavg, mosdepths_mdm2, sample_id_dict['69']):
+    
+    # Dataframe containing total genome average read depth
+    df1 = pd.read_csv(path1, sep="\t", header=0)
+    total_avg = df1.iloc[51,3]
+    
+    
+    # Dataframe containing paired normal sample's total genome average read depth
+    df1_N = pd.read_csv("/home/users/wonhee720/Projects/03_CRC/02_vcf/mosdepth/69-B/69-B.mosdepth.summary.txt", sep="\t", header=0)
+    total_avg_N = df1_N.iloc[51,3]
+    
+    
+    # Dataframe containing MDM2 average read depth
+    df2 = pd.read_csv(path2, sep="\t", header=None, names=['CHR','POS1','POS2','Depth'],dtype={'CHR':str,'POS1':int,'POS2':int,'Depth':float})
+    df2['Distance'] = df2['POS2']-df2['POS1']
+    df2['Total_depth'] = df2['Distance']*df2['Depth']
+    
+    total_bed = df2['Distance'].sum()
+    total_reads = df2['Total_depth'].sum()
+    
+    ecDNA_avg = total_reads/total_bed
+    
+    
+    # Dataframe containing MDM2 average read depth in paired normal sample
+    df2_N = pd.read_csv("/home/users/wonhee720/Projects/03_CRC/02_vcf/mosdepth/69-B.MDM2_ecDNA/69-B.MDM2_ecDNA.regions.bed.gz",
+                        sep="\t", header=None, names=['CHR','POS1','POS2','Depth'],dtype={'CHR':str,'POS1':int,'POS2':int,'Depth':float})
+    df2_N['Distance'] = df2_N['POS2']-df2_N['POS1']
+    
+    df2_N['Total_depth'] = df2_N['Distance']*df2_N['Depth']
+    
+    total_bed_N = df2_N['Distance'].sum()
+    total_reads_N = df2_N['Total_depth'].sum()
+    
+    ecDNA_avg_N = total_reads_N/total_bed_N
+    
+    # Dataframe for tumor ploidy, tumor cellularity information
+    if 'FT' in sample:
+        df3 = pd.read_csv(f"/home/users/wonhee720/Projects/03_CRC/02_vcf/sequenza/{sample}/{sample}_confints_CP.txt", sep="\t", header=0)
+        tcf = df3['cellularity'][0]
+        t_ploidy = df3['ploidy.estimate'][0]
+    
+    else:
+        df3 = pd.read_csv(f"/home/users/wonhee720/Projects/03_CRC/02_vcf/sequenza/{sample}/{sample}_alternative_solutions.txt", sep="\t", header=0)
+        
+        tcf = list(df3.loc[df3['cellularity']>0.9,]['cellularity'])[0]
+        t_ploidy = list(df3.loc[df3['cellularity']>0.9,]['ploidy'])[0]
+    
+    
+    # Gathering all the required information into one dictionary
+    ecDNA_CN[sample]['ecDNA_avg_T'] = ecDNA_avg
+    ecDNA_CN[sample]['Total_avg_T'] = total_avg
+    ecDNA_CN[sample]['ecDNA_avg_N'] = ecDNA_avg_N
+    ecDNA_CN[sample]['Total_avg_N'] = total_avg_N
+    ecDNA_CN[sample]['TCF'] = tcf
+    ecDNA_CN[sample]['Tumor_ploidy'] = t_ploidy
+
+
+df_ecDNA_CNt = pd.DataFrame(ecDNA_CN).transpose()
+
+
+# Final calculation of ecDNA CNt
+df_ecDNA_CNt['ecDNA_CNt'] = (df_ecDNA_CNt['ecDNA_avg_T']/df_ecDNA_CNt['Total_avg_T'])/(df_ecDNA_CNt['ecDNA_avg_N']/df_ecDNA_CNt['Total_avg_N'])*(df_ecDNA_CNt['TCF']*df_ecDNA_CNt['Tumor_ploidy'] + (1-df_ecDNA_CNt['TCF']*2))
+
+
+order = ['69-CT-FT', '69-LN-FT'
+         '69-LS78-FT', '69-LS78-O5', '69-LS78-O4',
+         '69-LS4-O3','69-LS4-O2', '69-LS4-FT',
+        '69-CT-O5', '69-CT-O9','69-CT-O8','69-CT-O4','69-CT-O7','69-CT-O10','69-CT-O3','69-CT-O1']
+
+fig, ax = plt.subplots(figsize=(5,20))
+
+sns.barplot(data=df_ecDNA_CNt, x='ecDNA_CNt', y=df_ecDNA_CNt.index, order=order, ax=ax, color="#1f77b4")
+
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+
+ax.set_yticklabels(["MC03-Primary-FT", "MC03-LymphNode-FT", "MC03-Liver2-FT","MC03-Liver2-O5","MC03-Liver2-O4",
+           "MC03-Liver1-O3","MC03-Liver1-O2","MC03-Liver1-FT",
+           "MC03-Primary-O5","MC03-Primary-O9","MC03-Primary-O8","MC03-Primary-O4",
+           "MC03-Primary-O7","MC03-Primary-O10",'MC03-Primary-O3','MC03-Primary-O1',
+           ])
+
+plt.xlabel("")
+
+plt.savefig(f"/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.CNt.svg")
+plt.show()
+
+
+
+#Checking the molecular timing of ecDNA amplification¶
+vcf_69_MDM2 = scripts.vcf.tidydf("/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69_vcfs/69.MDM2_cluster.snps.readinfo.vcf").df
+vcf_69_MDM2[['CHROM','POS','REF','ALT']] = vcf_69_MDM2[['CHROM','POS','REF','ALT']].astype(str)
+vaf_69_samples =  [f'vaf_highqual:::{x}'for x in sample_id_dict['69']]
+
+# Make a ID which will later be used for indexes
+vcf_69_MDM2['ID'] = "Chr" + vcf_69_MDM2['CHROM'] + ':' + vcf_69_MDM2['POS'] + " " + vcf_69_MDM2['REF'] + ">" + vcf_69_MDM2['ALT']
+
+vcf_69_MDM2_df = vcf_69_MDM2[ ['ID'] + vaf_69_samples]
+
+
+fig, ax = plt.subplots(figsize=(10, 6))
+df = vcf_69_MDM2_df.transpose().iloc[:,[0,4,3,5,2,1]]
+df = df[~df.index.str.contains("FT")]
+
+sns.stripplot(data=df, ax=ax)
+ax.set_xticklabels(labels=df.columns, rotation=90)
+
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+
+plt.ylabel('VAF')
+plt.xlabel('')
+
+#plt.savefig("/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.SNV_VAFs.svg")
+plt.show()
+
+#CNt inside ecDNA of this SNV locus is 1, therefore VAF = CCF
+df['LS78'] = df.index.str.contains("LS78")
+df['Chr3:18270070 G>A_CCF'] = df['Chr3:18270070 G>A']*100
+
+fig, ax = plt.subplots(figsize=(17.5/25.4,20/25.4))
+sns.stripplot(data=df.iloc[:,[6,7]], x='LS78', y='Chr3:18270070 G>A_CCF', ax=ax, size=3.5, 
+              edgecolor='black', linewidth=0.5, jitter=0.3, color='#E4007F')
+ax.set_xticklabels(labels=['Others','Liver2'])
+plt.ylim((-5,105))
+
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+
+plt.xlabel("")
+plt.ylabel('')
+plt.savefig("/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.dynamic_evidence.branch2_CCF.svg")
+plt.show()
+
+
+df_ecDNA_CNt_organoid['Branch2_SNV'] = np.where(df_ecDNA_CNt_organoid.index.str.contains("LS78-O4"), 59, 
+                                      np.where(df_ecDNA_CNt_organoid.index.str.contains("LS78-O5"), 31, 
+                                              0) )
+df_ecDNA_CNt_organoid['ecDNA_subclone'] = 'Branch2_SNV'
+
+bpt_ls = list(ccf_dist_econly.columns)
+ccf_dist_econly['Sample'] = ccf_dist_econly.apply(lambda row: sample_finder(row), axis=1)
+ccf_dist_econly = ccf_dist_econly.merge(df_ecDNA_CNt_organoid[['ecDNA_CNt']], how="left", left_on='Sample', right_index=True)
+
+
+cnt_dist_econly = copy.deepcopy(ccf_dist_econly)
+
+# Get dataframe consisted of breakpoint specific copy number
+for bpt in bpt_ls:
+    cnt_dist_econly[bpt] = (ccf_dist_econly[bpt]/100)*ccf_dist_econly['ecDNA_CNt']
+
+df_ecDNA_CNt_organoid.rename(columns={'Branch2_SNV':'ecDNA_subclone_CNt'}, inplace=True)
+
+df_ecDNA_CNt_organoid_concat = copy.deepcopy(df_ecDNA_CNt_organoid)
+
+for bpt in bpt_ls:
+    tmp_df = copy.deepcopy(df_ecDNA_CNt_organoid)
+    tmp_df['ecDNA_subclone_CNt'] = np.array(cnt_dist_econly[bpt])
+    tmp_df['ecDNA_subclone'] = bpt
+    df_ecDNA_CNt_organoid_concat = pd.concat([df_ecDNA_CNt_organoid_concat, tmp_df])
+
+branch1 = bpt_ls[0:12]
+branch3 = bpt_ls[13:21]
+branch4 = bpt_ls[12]
+branch5 = bpt_ls[21:27]
+
+def branch_finder(row):
+    bpt = row['ecDNA_subclone']
+    if bpt =='Branch2_SNV':
+        return 'ecDNA c2'
+        
+    elif bpt in branch1:
+        return "ecDNA c1"
+    
+    elif bpt in branch3:
+        return "ecDNA c3"
+
+    elif bpt in branch4:
+        return "ecDNA c4"
+
+    elif bpt in branch5:
+        return "ecDNA c5"    
+
+# Annotate branch information according to the figure to the dataframe
+df_ecDNA_CNt_organoid_concat['Branch'] = df_ecDNA_CNt_organoid_concat.apply(lambda x: branch_finder(x), axis=1)
+
+df_ecDNA_CNt_organoid_concat = df_ecDNA_CNt_organoid_concat.reset_index().rename(columns={'index':'Sample'})
+
+
+order = ['69-LS78-O5','69-LS78-O4', '69-LS4-O3', '69-LS4-O2', 
+ '69-CT-O5', '69-CT-O9', '69-CT-O8', '69-CT-O4', '69-CT-O7', '69-CT-O10', '69-CT-O3', '69-CT-O1']
+ecDNA_palette = {'ecDNA c1':'#f29600','ecDNA c2': '#e4007f','ecDNA c3': '#ffe200','ecDNA c4':'#00a0e9', 'ecDNA c5': '#339900'}
+
+
+fig, ax = plt.subplots(figsize=(45/25.4,57/25.4))
+
+sns.barplot(data=df_ecDNA_CNt_organoid_concat[df_ecDNA_CNt_organoid_concat['Branch']=='ecDNA c1'], 
+            ax=ax, x='ecDNA_subclone_CNt', y='Sample', orient='y', 
+            zorder=5, errorbar=None,
+           order=order, width=0.65, color = ecDNA_palette['ecDNA c1'])
+
+sns.barplot(data=df_ecDNA_CNt_organoid_concat[df_ecDNA_CNt_organoid_concat['Branch']=='ecDNA c2'], 
+            ax=ax, x='ecDNA_subclone_CNt', y='Sample', orient='y',
+             zorder=5, errorbar=None,
+           order=order, width=0.65, color = ecDNA_palette['ecDNA c2'])
+
+# "ecDNA c3" in the figure
+sns.barplot(data=df_ecDNA_CNt_organoid_concat[df_ecDNA_CNt_organoid_concat['Branch']=='ecDNA c4'], 
+            ax=ax, x='ecDNA_subclone_CNt', y='Sample', orient='y',
+           zorder=5, errorbar=None,
+           order=order, width=0.65, color = ecDNA_palette['ecDNA c4'])
+
+# "ecDNA c4" in the figure
+sns.barplot(data=df_ecDNA_CNt_organoid_concat[df_ecDNA_CNt_organoid_concat['Branch']=='ecDNA c3'], 
+            ax=ax, x='ecDNA_subclone_CNt', y='Sample', orient='y',
+            zorder=5, errorbar=None,
+           order=order, width=0.65, color = ecDNA_palette['ecDNA c3'])
+
+
+sns.barplot(data=df_ecDNA_CNt_organoid_concat[df_ecDNA_CNt_organoid_concat['Branch']=='ecDNA c5'], 
+            ax=ax, x='ecDNA_subclone_CNt', y='Sample', orient='y',
+            zorder=5, errorbar=None,
+           order=order, width=0.65, color = ecDNA_palette['ecDNA c5'])
+
+
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_visible(True)
+plt.setp(ax.patches, linewidth=0.5, edgecolor='black')
+ax.set_xticks([0,10,20,30,40,50,60])
+ax.set_xticklabels([0,"",20,"",40,"",60])
+
+ax.set_yticklabels(["MC03-Liver2-O5","MC03-Liver2-O4","MC03-Liver1-O3","MC03-Liver1-O2",
+                    "MC03-Primary-O5" ,"MC03-Primary-O9","MC03-Primary-O8","MC03-Primary-O4",
+                    "MC03-Primary-O7","MC03-Primary-O10",'MC03-Primary-O3','MC03-Primary-O1'])
+
+ax.legend( loc='upper right',  frameon=False)
+
+plt.ylabel("")
+plt.xlabel("Copy number")
+plt.tight_layout()
+plt.savefig(f"/home/users/wonhee720/Projects/03_CRC/06_results/rearrangements/ecDNA/P69.MDM2_cluster.CNt.clonal_shift.stacked.svg")
+plt.show()
+
+
+
+
+
+
+
+
+
