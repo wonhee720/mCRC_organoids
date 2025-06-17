@@ -87,9 +87,10 @@ for x in all_sigs:
     else:
         sig_color_dict_modi_subet[x] = sns.color_palette(f"blend:#ffffff,{sig_color_dict_modi[x]}", as_cmap=True)
         
-vmin = {'SBS 5,40':4000, 'SBS 40':4000, 'SBS 3':490, 'SBS oxaliplatin': 100, 'Clock-like signature': 4000, 'Chemotherapy-related signature':200}
+vmin = {'SBS 5,40':4000, 'SBS 40':4000, 'SBS 3':490, 'SBS oxaliplatin': 0, # Originally 100 (without fillna 0)
+        'SBS cisplatin/oxaliplatin': 0, 'Clock-like signature': 4000, 'Chemotherapy-related signature':200}
 vmax = {'SBS 5,40':11500, 'SBS 40':11500, 'SBS 3': 979 ,'SBS oxaliplatin':3000, 'Clock-like signature': 12500, 'Chemotherapy-related signature':4300}
-center = {'SBS oxaliplatin':400}
+center = {'SBS oxaliplatin':1500} # Originally 400 (without fillna 0)
 cbar_yticks = {'ID radiation':850,'SBS cisplatin/oxaliplatin':40,'SBS oxaliplatin':2000, 'SBS 17b':500, 'SBS 17a':500,
   'SBS 5,40':8000,'SBS 40':8000,'SBS 5':900,'SBS 3':750,'SBS 13':700,'SBS 1':2500,'SBS 18':400,'SBS 25':1200,'SBS 37':300,'SBS 41':6000,
                'Clock-like signature':10000,'Chemotherapy-related signature':1500}
